@@ -7,7 +7,7 @@
 
 // ==UserScript==
 // @name         Web Inspector for Claude Code
-// @namespace    https://github.com/user/web-inspector
+// @namespace    https://github.com/kissesu/WebInspector
 // @version      1.0.0
 // @description  选中页面元素并发送到 Claude Code CLI
 // @author       Atlas.oi
