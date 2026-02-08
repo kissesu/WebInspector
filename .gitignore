@@ -1,0 +1,9 @@
+.ace-tool/
+openspec/
+**/CLAUDE.md
+
+# Bridge 运行时文件
+bridge/*.log
+bridge/*.pid
+bridge/node_modules/
+bridge/pnpm-lock.yaml

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "web-inspector": {
+      "command": "node",
+      "args": ["bridge/mcp-server.mjs"]
+    }
+  }
+}
