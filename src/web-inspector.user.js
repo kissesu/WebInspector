@@ -69,6 +69,30 @@
   };
 
   // ============================================
+  // 域名级 Inspector 状态持久化
+  // 每个域名独立存储，键名: inspector_active_{hostname}
+  // ============================================
+  const DOMAIN_KEY_PREFIX = 'inspector_active_';
+
+  /**
+   * 获取当前域名的 Inspector 激活状态
+   *
+   * @returns {boolean} 当前域名是否已激活 Inspector
+   */
+  function getDomainActive() {
+    return GM_getValue(DOMAIN_KEY_PREFIX + location.hostname, false);
+  }
+
+  /**
+   * 设置当前域名的 Inspector 激活状态
+   *
+   * @param {boolean} active - 是否激活
+   */
+  function setDomainActive(active) {
+    GM_setValue(DOMAIN_KEY_PREFIX + location.hostname, active);
+  }
+
+  // ============================================
   // 状态管理
   // ============================================
   const State = {
@@ -914,11 +938,19 @@
       this.ws.addEventListener('open', () => {
         this.setState('CONNECTED');
         this.resetReconnect();
+        // 连接成功后检查域名状态，自动恢复 Inspector
+        if (getDomainActive() && !Inspector.isActive) {
+          activateInspector();
+        }
       });
 
       this.ws.addEventListener('close', () => {
         this.ws = null;
         this.setState('DISCONNECTED');
+        // 连接断开时自动停用 Inspector（不清除域名状态，重连后可恢复）
+        if (Inspector.isActive) {
+          deactivateInspector();
+        }
         if (!this.isManualClose && !this.isReconnecting) {
           this.isReconnecting = true;
           this.scheduleReconnect();
@@ -1041,6 +1073,8 @@
      * 初始化 UI 组件
      */
     init() {
+      // 幂等保护：防止菜单快速切换导致重复初始化
+      if (this.host) return;
       this.createHost();
       this.injectStyles();
       this.renderGhostButton();
@@ -1301,16 +1335,28 @@
     },
 
     /**
-     * 切换选择器状态
+     * 切换选择器状态（Ghost 按钮点击入口）
+     *
+     * 业务逻辑：
+     * 1. 激活前检查 WS 连接状态（未连接时拒绝激活）
+     * 2. 切换 Inspector 状态
+     * 3. 持久化域名级激活状态
      */
     toggleInspector() {
+      // 未连接时拒绝激活，Toast 提示
+      if (!Inspector.isActive && State.connectionState !== 'CONNECTED') {
+        this.showToast('Waiting for connection...', 'warning');
+        return;
+      }
       if (Inspector.isActive) {
         Inspector.deactivate();
         this.ghostButton.classList.remove('active');
+        setDomainActive(false);
       } else {
         Inspector.activate();
         this.ghostButton.classList.add('active');
         this.hideInfoPanel();
+        setDomainActive(true);
       }
     },
 
@@ -1434,46 +1480,59 @@
   };
 
   // ============================================
-  // 激活/停用逻辑 (阶段 1 改进)
+  // 核心初始化 / 激活 / 停用逻辑
   // ============================================
 
   /**
-   * 激活 Web Inspector
+   * 初始化核心环境（UI + WebSocket 连接）
    *
    * 业务逻辑：
    * 1. 初始化 UI 组件（Ghost 按钮、Shadow DOM）
-   * 2. 激活 Inspector 选择器（绑定事件监听）
-   * 3. 连接 WebSocket 服务器
+   * 2. 连接 WebSocket 服务器
+   * 注意：不激活 Inspector，Inspector 由 Ghost 按钮或域名恢复触发
    */
-  function activateInspector() {
-    console.log('[Web Inspector] 正在激活...');
+  function initCore() {
+    console.log('[Web Inspector] 正在初始化核心环境...');
     UI.init();
-    Inspector.activate();
     Transport.connect();
-    // 同步 Ghost 按钮激活状态（页面刷新恢复时需要）
-    if (UI.ghostButton) {
-      UI.ghostButton.classList.add('active');
-    }
-    console.log('[Web Inspector] 已激活');
+    console.log('[Web Inspector] 核心环境已就绪（Inspector 未激活）');
   }
 
   /**
-   * 停用 Web Inspector
+   * 激活 Inspector 选择功能
+   *
+   * 业务逻辑：
+   * 1. 防重入检查
+   * 2. 激活 Inspector 选择器
+   * 3. 同步 Ghost 按钮视觉状态
+   * 注意：不初始化 UI 和 WS（由 initCore() 负责）
+   */
+  function activateInspector() {
+    if (Inspector.isActive) return;
+    console.log('[Web Inspector] 正在激活 Inspector...');
+    Inspector.activate();
+    if (UI.ghostButton) {
+      UI.ghostButton.classList.add('active');
+    }
+    console.log('[Web Inspector] Inspector 已激活');
+  }
+
+  /**
+   * 停用 Inspector 选择功能
    *
    * 业务逻辑：
    * 1. 停用 Inspector 选择器（移除事件监听）
-   * 2. 断开 WebSocket 连接
-   * 3. 隐藏 UI 组件（保留 Ghost 按钮）
+   * 2. 隐藏信息面板
+   * 注意：不断开 WS 连接，WS 保持连接以显示状态颜色
    */
   function deactivateInspector() {
-    console.log('[Web Inspector] 正在停用...');
+    if (!Inspector.isActive) return;
+    console.log('[Web Inspector] 正在停用 Inspector...');
     Inspector.deactivate();
-    Transport.disconnect();
-    // UI 保留 Ghost 按钮，隐藏其他组件
     if (UI.infoPanel) {
       UI.hideInfoPanel();
     }
-    console.log('[Web Inspector] 已停用');
+    console.log('[Web Inspector] Inspector 已停用');
   }
 
   // ============================================
@@ -1481,9 +1540,11 @@
   // ============================================
 
   /**
-   * 切换 Web Inspector 启用状态
+   * 切换 Web Inspector 全局启用状态
    *
-   * 改进：移除 location.reload()，直接调用激活/停用逻辑
+   * 业务逻辑：
+   * - 启用: 初始化核心环境（UI + WS），不自动激活 Inspector
+   * - 禁用: 停用 Inspector + 断开 WS + 清除当前域名状态
    */
   function toggleEnabled() {
     const currentState = GM_getValue('enabled', false);
@@ -1491,10 +1552,12 @@
     GM_setValue('enabled', newState);
 
     if (newState) {
-      activateInspector();
-      console.log('[Web Inspector] 已通过菜单启用');
+      initCore();
+      console.log('[Web Inspector] 已通过菜单启用（请点击 Ghost 按钮激活 Inspector）');
     } else {
       deactivateInspector();
+      Transport.disconnect();
+      setDomainActive(false);
       console.log('[Web Inspector] 已通过菜单禁用');
     }
   }
@@ -1576,7 +1639,8 @@
 
     const enabled = GM_getValue('enabled', false);
     if (enabled) {
-      activateInspector();
+      initCore();
+      // Inspector 激活由 WS 连接成功后的域名状态恢复触发（见 Transport open 回调）
     } else {
       console.log('[Web Inspector] 功能已禁用，点击油猴菜单"切换 Web Inspector"启用');
     }
